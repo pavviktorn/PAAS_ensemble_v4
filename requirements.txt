@@ -1,0 +1,102 @@
+# PAAS_ensemble_v4 -- pinned requirements for the ONE venv used by BOTH training and inference.
+#
+#   /datasets/work/vLLM/temp/PAAS_qwen3vl/venv/bin/python      (Python 3.12.12, CUDA 13.0)
+#
+# Every stage runs on this interpreter: Qwen3.5-4B LoRA/distill/merge, the functional gate, MIDS
+# answer generation, all four detector trainers (MIDS-4c, A2_9c, GSD, SeLop), deployment, threshold
+# calibration and the FastAPI server. train/_bootstrap.py and paas/env.py refuse to run on anything
+# with transformers<5, because the tf5 CLIP ports (flattened .vision_model, tensor-returning
+# CLIPEncoderLayer) and the in-process vLLM both require it.
+#
+# Versions are the exact set this pipeline was validated against -- pinned, not ranged, because
+# several defects in this project came from silent API drift (e.g. albumentations 2.x renaming
+# quality_lower/upper, which disabled JPEG augmentation without an error).
+#
+# ISOLATION (2026-08-14): the venv is now SELF-CONTAINED and must stay that way.
+#   pyvenv.cfg          include-system-site-packages = false   (backup: pyvenv.cfg.bak)
+#   run_finetuning.sh   export PYTHONNOUSERSITE=1
+#   guards              train/_bootstrap.py + paas/env.py abort if either is undone
+# This is not cosmetic. ~/.local still holds a COMPLETE legacy stack -- transformers 4.37.2,
+# peft 0.7.1, tokenizers 0.15.2, accelerate 0.21.0 -- which used to be inert only because the venv
+# sorted earlier on sys.path. Any perturbation of that order would silently load tf4 and train a
+# head that cannot be served. Verify at any time with:
+#   venv/bin/python train/check_venv_isolation.py       # path + 28 modules + 6 deep imports + pins
+#
+# INSTALL ORDER MATTERS -- and three groups CANNOT be installed by plain resolution (see below):
+#
+#   python -m venv venv && . venv/bin/activate && pip install -U pip setuptools wheel
+#   pip install torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 \
+#       --index-url https://download.pytorch.org/whl/cu130          # pulls numpy 2.x -- fixed below
+#   pip install --no-deps opencv-python-headless==4.13.0.92         # (1)
+#   pip install -c constraints -r requirements.txt                  # constraints = numpy + ml-dtypes
+#   pip install --no-deps albumentations==2.0.8 albucore==0.0.24    # (2)
+#   pip install --no-deps vllm==0.21.0 mistral_common==1.11.2 ...   # (3) + its chain
+#
+# Why --no-deps is REQUIRED in those three places (all trace to one root cause):
+#  (1) opencv-python-headless 4.13.0.92 DECLARES numpy>=2, but this pipeline is validated on
+#      numpy 1.26.4. The pair is ABI-fine (a C extension built against numpy 2 headers runs on
+#      numpy>=1.19); pip treats the declaration as hard and returns ResolutionImpossible.
+#  (2) albumentations REQUIRES opencv, which drags opencv's numpy>=2 declaration back into the
+#      resolution -- same wall, one level up.
+#  (3) vllm's closure cannot be resolved at all: mistral-common backtracks to no solution. Its
+#      chain is therefore pinned to the exact versions the validated environment runs.
+# Installing torch from plain PyPI first pulls a different CUDA build and vLLM then mismatches it.
+
+# ---------------------------------------------------------------- core DL stack
+torch==2.11.0+cu130            # +cu130 build; see the index-url above
+torchvision==0.26.0            # GSD/SeLop transform pipelines
+torchaudio==2.11.0             # not imported by us, but vllm==0.21.0 HARD-REQUIRES it (torchaudio==2.11.0)
+transformers==5.13.1           # >=5 REQUIRED: tf5 CLIPVisionModel layout + Qwen3.5 support
+vllm==0.21.0                   # in-process MLLM (no server) for FFAA generation + inference
+accelerate==1.14.0             # transformers Trainer backend (Qwen LoRA / distill)
+peft==0.19.1                   # LoRA r=32/alpha=48 on the MLLM
+deepspeed==0.14.5              # MIDS-4c trainer
+safetensors==0.8.0
+tokenizers==0.22.2
+huggingface-hub==1.23.0
+sentencepiece==0.2.1           # REQUIRED by T5Tokenizer(use_fast=False, legacy=False)
+protobuf==6.33.5               # slow-tokenizer conversion path
+triton==3.6.0                  # ships with the cu130 torch build; listed for reproducibility
+
+# ---------------------------------------------------------------- Qwen3.5 hybrid-attention fast path
+flash-linear-attention==0.5.2  # GDN/Mamba linear-attention kernels (~2x MLLM train speedup, Exp 17)
+einops==0.8.2
+# REQUIRED to train the MLLM: train/train_qwen_mllm.py passes attn_implementation="flash_attention_2",
+# and transformers raises ImportError outright if the package is absent -- it does NOT fall back to
+# sdpa. Omitting it aborts Step 2a ~10s in. No PyPI wheel matches torch 2.11.0+cu130/cp312, so this
+# is a SOURCE build (30-60 min, needs nvcc); the working copy in this venv was taken from the
+# already-compiled ~/.local build rather than rebuilt. Verify with:
+#   python -c "from transformers.utils import is_flash_attn_2_available; print(is_flash_attn_2_available())"
+flash-attn==2.8.3              # ~934MB compiled extension; build against the EXACT torch in use
+
+# ---------------------------------------------------------------- data / vision / metrics
+numpy==1.26.4                  # KEEP <2: numpy 2.x breaks parts of this stack
+opencv-python-headless==4.13.0.92   # headless: servers have no GUI libs
+pillow==12.1.1
+albumentations==2.0.8          # NOTE: 2.x uses quality_range, NOT quality_lower/upper
+scikit-learn==1.8.0            # AUC / AP / accuracy for selection + threshold fitting
+scipy==1.17.0
+PyYAML==6.0.3                  # 9-class (MidsPlusConfig) configs
+tqdm==4.67.3
+
+# ---------------------------------------------------------------- ONNX (YOLO11 rotation detector)
+onnxruntime==1.26.0            # ffaa/yolo11_cls_onnx.py -- used by the FastAPI app on every request
+onnx==1.21.0
+
+# ---------------------------------------------------------------- serving (app_fastapi_json_v5_safe_jsonfmt.py)
+fastapi==0.129.0
+uvicorn==0.47.0
+pydantic==2.13.4
+starlette==0.52.1
+python-multipart==0.0.28       # REQUIRED for UploadFile endpoints (/face_liveness*)
+Werkzeug==3.1.5                # secure_filename on uploaded files
+
+# ---------------------------------------------------------------- optional
+# Only needed for scripts/run_dataset.py --filter-real (paas/data/face_filter.py). The pipeline and
+# the server run fine without it; the filter degrades gracefully and logs when unavailable.
+insightface==0.7.3
+
+# ---------------------------------------------------------------- dev / reporting (not needed to train or serve)
+# Used by the EXPERIMENTS.pdf builders (build_expNN.py), which live in ../PAAS_qwen3vl.
+# fpdf2==2.8.7
+# pypdf==6.14.2
