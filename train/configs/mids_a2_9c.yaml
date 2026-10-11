@@ -1,0 +1,53 @@
+# A2_9c -- "SVD + GenD", 9-class. Field-for-field match to the DEPLOYED weights/ensemble9/
+# A2_svdgend_9c.pt config (verified by loading the checkpoint), which is the member the paas fusion
+# actually uses. Differs from mids_pp.yaml in the two ways that matter:
+#   * num_classes 9  (NOT 4)  -- inference does logits.view(n, 3, 3), so a 4-class head cannot load
+#   * artifact_enabled false  -- the ForensicsAdapter branch is A3's recipe (mids_pp), not A2's
+# Data: the MLLM-FREE 9-class set from train/build_manifests.py --mode mids9
+#       (3 fixed claim anchors; label = 3*true + claim; true/claim in {0 real,1 pad,2 deepfake}).
+
+dim: 768
+image_model_path: models/clip-vit-large-patch14-336
+text_model_path: models/t5-base
+samples_per_image: 3
+num_classes: 9
+
+# --- CLIP adaptation: Effort SVD residual adapters (as deployed) ---
+clip_adapt: svd
+svd_target_last_layers: 6
+svd_targets: [self_attn.out_proj]
+svd_residual_rank: 16
+tune_layer_norm: true
+
+# --- A2 = SVD + GenD, NO artifact branch ---
+artifact_enabled: false
+
+# --- losses (as deployed) ---
+ce_weight: 1.0
+ce_class_weights: null
+label_smoothing: 0.0
+alignment_weight: 0.5         # GenD
+uniformity_weight: 0.5        # GenD
+uniformity_t: 2.0
+svd_orth_weight: 0.01         # Effort
+svd_keep_weight: 0.001        # Effort
+
+# --- data (overridden by run_finetuning.sh --set train_data_path=... val_data_path=...) ---
+train_data_path: null
+val_data_path: null
+image_size: 336
+augment: true
+
+# --- optimisation (deployed lr/bs/wd; epochs sized for the ~1.37M-image trainset) ---
+select_metric: auc      # production ranks by marginal fake-score -> select by AUC
+epochs: 2
+batch_size: 24
+val_batch_size: 12
+lr: 1.0e-4
+weight_decay: 1.0e-5
+warmup_ratio: 0.03
+grad_clip: 1.0
+amp_dtype: bf16
+num_workers: 8
+seed: 0
+output_dir: runs/ninec
